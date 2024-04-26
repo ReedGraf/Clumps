@@ -7,7 +7,7 @@ import net.darkhax.curseforgegradle.TaskPublishCurseForge
 plugins {
     id("com.blamejared.clumps.default")
     id("com.blamejared.clumps.loader")
-    id("net.neoforged.gradle.userdev") version ("7.0.81")
+    id("net.neoforged.gradle.userdev") version ("7.0.107")
     id("com.modrinth.minotaur")
 }
 
