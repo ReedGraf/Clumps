@@ -8,12 +8,14 @@ import com.blamejared.clumps.platform.Services;
 import com.mojang.datafixers.util.Either;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
-import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.ExperienceOrb;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.enchantment.EnchantedItemInUse;
+import net.minecraft.world.item.enchantment.EnchantmentHelper;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.entity.EntityTypeTest;
 import net.minecraft.world.phys.AABB;
@@ -33,11 +35,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.BiFunction;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+@SuppressWarnings("OptionalUsedAsFieldOrParameterType")
 @Mixin(value = ExperienceOrb.class, priority = 1001)
 public abstract class MixinExperienceOrb extends Entity implements IClumpedOrb {
     
@@ -51,7 +53,7 @@ public abstract class MixinExperienceOrb extends Entity implements IClumpedOrb {
     private int value;
     
     @Shadow
-    protected abstract int repairPlayerItems(Player player, int i);
+    protected abstract int repairPlayerItems(ServerPlayer player, int i);
     
     @Shadow
     private static boolean canMerge(ExperienceOrb experienceOrb, int id, int value) {
@@ -59,17 +61,12 @@ public abstract class MixinExperienceOrb extends Entity implements IClumpedOrb {
         return false;
     }
     
-    @Shadow
-    protected abstract int xpToDurability(int $$0);
-    
-    @Shadow
-    protected abstract int durabilityToXp(int $$0);
-    
     @Unique
     public Map<Integer, Integer> clumps$clumpedMap;
     
+    
     @Unique
-    public Map.Entry<EquipmentSlot, ItemStack> clumps$currentEntry;
+    public Optional<EnchantedItemInUse> clumps$currentEntry;
     
     public MixinExperienceOrb(EntityType<?> entityType, Level level) {
         
@@ -89,9 +86,9 @@ public abstract class MixinExperienceOrb extends Entity implements IClumpedOrb {
     }
     
     @Inject(method = "playerTouch(Lnet/minecraft/world/entity/player/Player;)V", at = @At(value = "HEAD"), cancellable = true)
-    public void playerTouch(Player player, CallbackInfo ci) {
+    public void playerTouch(Player rawPlayer, CallbackInfo ci) {
         
-        if(!this.level().isClientSide) {
+        if(rawPlayer instanceof ServerPlayer player) {
             // Fire the Forge event
             if(ClumpsCommon.pickupXPEvent.test(player, (ExperienceOrb) (Entity) this)) {
                 return;
@@ -125,25 +122,29 @@ public abstract class MixinExperienceOrb extends Entity implements IClumpedOrb {
         }
     }
     
-    @ModifyVariable(index = 3, method = "repairPlayerItems", at = @At(value = "INVOKE_ASSIGN", target = "Lnet/minecraft/world/item/enchantment/EnchantmentHelper;getRandomItemWith(Lnet/minecraft/world/item/enchantment/Enchantment;Lnet/minecraft/world/entity/LivingEntity;Ljava/util/function/Predicate;)Ljava/util/Map$Entry;"))
-    public Map.Entry<EquipmentSlot, ItemStack> clumps$captureCurrentEntry(Map.Entry<EquipmentSlot, ItemStack> entry) {
+    @ModifyVariable(index = 3, method = "repairPlayerItems", at = @At(value = "INVOKE_ASSIGN", target = "Lnet/minecraft/world/item/enchantment/EnchantmentHelper;getRandomItemWith(Lnet/minecraft/core/component/DataComponentType;Lnet/minecraft/world/entity/LivingEntity;Ljava/util/function/Predicate;)Ljava/util/Optional;"))
+    public Optional<EnchantedItemInUse> clumps$captureCurrentEntry(Optional<EnchantedItemInUse> entry) {
         
         clumps$currentEntry = entry;
         return entry;
     }
     
-    @Inject(method = "repairPlayerItems", cancellable = true, at = @At(value = "INVOKE_ASSIGN", target = "Lnet/minecraft/world/item/enchantment/EnchantmentHelper;getRandomItemWith(Lnet/minecraft/world/item/enchantment/Enchantment;Lnet/minecraft/world/entity/LivingEntity;Ljava/util/function/Predicate;)Ljava/util/Map$Entry;"))
-    public void clumps$repairPlayerItems(Player player, int actualValue, CallbackInfoReturnable<Integer> cir) {
+    @Inject(method = "repairPlayerItems", cancellable = true, at = @At(value = "INVOKE_ASSIGN", target = "Lnet/minecraft/world/item/enchantment/EnchantmentHelper;getRandomItemWith(Lnet/minecraft/core/component/DataComponentType;Lnet/minecraft/world/entity/LivingEntity;Ljava/util/function/Predicate;)Ljava/util/Optional;"))
+    public void clumps$repairPlayerItems(ServerPlayer player, int actualValue, CallbackInfoReturnable<Integer> cir) {
         
-        cir.setReturnValue(Optional.ofNullable(clumps$currentEntry)
-                .map(Map.Entry::getValue)
+        cir.setReturnValue(clumps$currentEntry
                 .map(foundItem -> {
-                    BiFunction<ItemStack, Integer, Float> repairRatio = Services.PLATFORM.getRepairRatio((itemStack, integer) -> (float) this.xpToDurability(integer));
-                    int toRepair = Math.min(repairRatio.apply(foundItem, actualValue)
-                            .intValue(), foundItem.getDamageValue());
-                    foundItem.setDamageValue(foundItem.getDamageValue() - toRepair);
-                    int used = actualValue - this.durabilityToXp(toRepair);
-                    return used > 0 ? this.repairPlayerItems(player, used) : 0;
+                    ItemStack itemstack = foundItem.itemStack();
+                    int xpToRepair = EnchantmentHelper.modifyDurabilityToRepairFromXp(player.serverLevel(), itemstack, (int) (actualValue * Services.PLATFORM.getRepairRatio(itemstack)));
+                    int toRepair = Math.min(xpToRepair, itemstack.getDamageValue());
+                    itemstack.setDamageValue(itemstack.getDamageValue() - toRepair);
+                    if(toRepair > 0) {
+                        int used = actualValue - toRepair * actualValue / xpToRepair;
+                        if(used > 0) {
+                            return this.repairPlayerItems(player, used);
+                        }
+                    }
+                    return 0;
                 })
                 .orElse(actualValue));
     }
@@ -169,7 +170,7 @@ public abstract class MixinExperienceOrb extends Entity implements IClumpedOrb {
         int id = serverLevel.getRandom().nextInt(40);
         List<ExperienceOrb> list = serverLevel.getEntities(EntityTypeTest.forClass(ExperienceOrb.class), aABB, (experienceOrbx) -> canMerge(experienceOrbx, id, value));
         if(!list.isEmpty()) {
-            ExperienceOrb experienceOrb = list.get(0);
+            ExperienceOrb experienceOrb = list.getFirst();
             Map<Integer, Integer> clumpedMap = ((IClumpedOrb) experienceOrb).clumps$getClumpedMap();
             ((IClumpedOrb) experienceOrb).clumps$setClumpedMap(Stream.of(clumpedMap, Collections.singletonMap(value, 1))
                     .flatMap(map -> map.entrySet().stream())
