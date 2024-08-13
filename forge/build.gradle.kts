@@ -30,6 +30,18 @@ minecraft {
                 }
             }
         }
+        create("server") {
+            taskName("Server")
+            workingDirectory(project.file("run"))
+            ideaModule("${rootProject.name}.${project.name}.main")
+            args("-mixin.config=${Properties.MODID}.mixins.json")
+            mods {
+                create(Properties.MODID) {
+                    source(sourceSets.main.get())
+                }
+            }
+            args("--nogui")
+        }
     }
 }
 
@@ -73,3 +85,19 @@ modrinth {
     loaders.add("forge")
 }
 tasks.modrinth.get().dependsOn(tasks.jar)
+
+tasks {
+    named<Jar>("jar").configure {
+        manifest {
+            attributes["MixinConfigs"] = "${Properties.MODID}.mixins.json"
+        }
+    }
+}
+
+publishing {
+    publications {
+        named("mavenJava", MavenPublication::class) {
+            fg.component(this)
+        }
+    }
+}
